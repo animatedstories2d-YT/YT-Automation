@@ -1,0 +1,38 @@
+name: Daily Video Generation
+
+on:
+  schedule:
+    - cron: "0 12 * * *"   # runs daily at 12:00 UTC — adjust to your posting time
+  workflow_dispatch: {}     # lets you trigger it manually from the Actions tab
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Generate video
+        env:
+          AGNES_API_KEY: ${{ secrets.AGNES_API_KEY }}
+          CHARACTER_PROMPT: ${{ secrets.CHARACTER_PROMPT }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        run: python scripts/generate_video.py
+
+      - name: Upload video as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-video
+          path: output/final_video.mp4
