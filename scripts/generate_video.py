@@ -11,7 +11,6 @@ Daily YouTube Shorts pipeline.
 
 Env vars required:
   AGNES_API_KEY       - your Agnes AI API key
-  CHARACTER_PROMPT     - detailed description of your recurring character (style, face, outfit)
 Optional:
   REFERENCE_IMAGE_PATH - path to a saved reference image to reuse across ALL videos
                           (recommended once you like a design — see note at bottom of file)
@@ -30,13 +29,8 @@ BASE_URL = "https://apihub.agnes-ai.com"
 AGNES_API_KEY = os.environ["AGNES_API_KEY"]
 HEADERS = {"Authorization": f"Bearer {AGNES_API_KEY}", "Content-Type": "application/json"}
 
-CHARACTER_PROMPT = os.environ.get(
-    "CHARACTER_PROMPT",
-    "anime style news narrator, young adult, short black hair, dark blue blazer, "
-    "neutral studio background, clean cel-shaded anime art style, front-facing",
-)
 REFERENCE_IMAGE_PATH = os.environ.get("REFERENCE_IMAGE_PATH")  # optional local file
-TTS_VOICE = os.environ.get("TTS_VOICE", "en-US-GuyNeural")
+TTS_VOICE = os.environ.get("TTS_VOICE", "en-US-JennyNeural")
 
 # Shorts must be vertical 9:16 to land on the Shorts shelf.
 IMAGE_SIZE = "768x1152"       # portrait, close to 2:3 — good source for 9:16 video
@@ -69,14 +63,19 @@ def upload_local_image(path: str) -> str:
     )
 
 
-def generate_character_reference() -> str:
-    """Generate a fresh character reference image and return its URL."""
+def generate_character_reference(sentences: list[str]) -> str:
+    """Generate a character reference based on the day's script, so the
+    person/subject shown matches whoever the incident is actually about."""
     if REFERENCE_IMAGE_PATH:
         return upload_local_image(REFERENCE_IMAGE_PATH)
 
+    prompt = (
+        f"Anime style character design, front-facing, clean cel-shaded anime art. "
+        f"Depict the main person in this real event: {sentences[0]}"
+    )
     payload = {
         "model": "agnes-image-2.1-flash",
-        "prompt": CHARACTER_PROMPT,
+        "prompt": prompt,
         "size": IMAGE_SIZE,
         "extra_body": {"response_format": "url"},
     }
@@ -200,7 +199,7 @@ def main() -> None:
     sentences = split_script(SCRIPT_PATH)
     print(f"Found {len(sentences)} scenes in script.txt")
 
-    reference_url = generate_character_reference()
+    reference_url = generate_character_reference(sentences)
     print(f"Character reference: {reference_url}")
 
     merged_clips = []
