@@ -30,7 +30,7 @@ AGNES_API_KEY = os.environ["AGNES_API_KEY"]
 HEADERS = {"Authorization": f"Bearer {AGNES_API_KEY}", "Content-Type": "application/json"}
 
 REFERENCE_IMAGE_PATH = os.environ.get("REFERENCE_IMAGE_PATH")  # optional local file
-TTS_VOICE = os.environ.get("TTS_VOICE", "en-US-JennyNeural")
+TTS_VOICE = os.environ.get("TTS_VOICE", "en-US-AvaMultilingualNeural")
 
 # Shorts must be vertical 9:16 to land on the Shorts shelf.
 IMAGE_SIZE = "768x1152"       # portrait, close to 2:3 — good source for 9:16 video
