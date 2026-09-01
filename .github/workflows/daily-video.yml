@@ -20,12 +20,11 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          sudo apt-get update && sudo apt-get install -y ffmpeg
+          sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
 
       - name: Generate video
         env:
           AGNES_API_KEY: ${{ secrets.AGNES_API_KEY }}
-          CHARACTER_PROMPT: ${{ secrets.CHARACTER_PROMPT }}
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
