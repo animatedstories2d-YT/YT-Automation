@@ -19,6 +19,7 @@ Optional:
 
 import asyncio
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -46,11 +47,25 @@ OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 
-def split_script(path: Path) -> list[str]:
-    """Split the script into scenes. Every '.' marks the end of one scene/point."""
+def split_script(path: Path) -> list[dict]:
+    """Split the script into scenes. Every '.' marks the end of one scene/point.
+
+    You can add a visual direction in square brackets right before the full
+    stop, e.g.:
+        A hiker was stranded on a mountain ledge [snowy cliff, night, dramatic lighting].
+    The bracketed part is used only for the image/video prompt — it is
+    stripped out before narration, so it never gets spoken aloud.
+    """
     text = path.read_text(encoding="utf-8")
-    sentences = [s.strip() for s in text.split(".") if s.strip()]
-    return sentences
+    raw_sentences = [s.strip() for s in text.split(".") if s.strip()]
+
+    scenes = []
+    for raw in raw_sentences:
+        match = re.search(r"\[(.*?)\]", raw)
+        visual = match.group(1).strip() if match else ""
+        narration = re.sub(r"\[.*?\]", "", raw).strip()
+        scenes.append({"text": narration, "visual": visual})
+    return scenes
 
 
 def upload_local_image(path: str) -> str:
@@ -63,15 +78,17 @@ def upload_local_image(path: str) -> str:
     )
 
 
-def generate_character_reference(sentences: list[str]) -> str:
+def generate_character_reference(scenes: list[dict]) -> str:
     """Generate a character reference based on the day's script, so the
     person/subject shown matches whoever the incident is actually about."""
     if REFERENCE_IMAGE_PATH:
         return upload_local_image(REFERENCE_IMAGE_PATH)
 
+    first = scenes[0]
+    detail = f" {first['visual']}." if first["visual"] else ""
     prompt = (
         f"Anime style character design, front-facing, clean cel-shaded anime art. "
-        f"Depict the main person in this real event: {sentences[0]}"
+        f"Depict the main person in this real event: {first['text']}.{detail}"
     )
     payload = {
         "model": "agnes-image-2.1-flash",
@@ -84,11 +101,12 @@ def generate_character_reference(sentences: list[str]) -> str:
     return r.json()["data"][0]["url"]
 
 
-def generate_scene_image(sentence: str, reference_url: str) -> str:
+def generate_scene_image(scene: dict, reference_url: str) -> str:
     """Generate a scene image that reuses the reference so the character matches."""
+    detail = f" Visual direction: {scene['visual']}." if scene["visual"] else ""
     prompt = (
         f"Same character as the reference image, same face, hairstyle and outfit. "
-        f"Scene: {sentence}. Anime style, consistent character design, cinematic framing."
+        f"Scene: {scene['text']}.{detail} Anime style, consistent character design, cinematic framing."
     )
     payload = {
         "model": "agnes-image-2.1-flash",
@@ -102,10 +120,11 @@ def generate_scene_image(sentence: str, reference_url: str) -> str:
     return r.json()["data"][0]["url"]
 
 
-def create_video_task(image_url: str, sentence: str, seed: int = 42) -> str:
+def create_video_task(image_url: str, scene: dict, seed: int = 42) -> str:
+    detail = f" {scene['visual']}." if scene["visual"] else ""
     payload = {
         "model": "agnes-video-v2.0",
-        "prompt": f"{sentence}. Subtle natural motion, keep character face and outfit identical.",
+        "prompt": f"{scene['text']}.{detail} Subtle natural motion, keep character face and outfit identical.",
         "image": image_url,
         "width": VIDEO_WIDTH,
         "height": VIDEO_HEIGHT,
@@ -124,10 +143,28 @@ def poll_video(video_id: str, timeout: int = 300, interval: int = 5) -> str:
         r = requests.get(f"{BASE_URL}/agnesapi", headers=HEADERS, params={"video_id": video_id}, timeout=30)
         r.raise_for_status()
         data = r.json()
-        if data["status"] == "completed":
-            return data["metadata"]["url"]
-        if data["status"] == "failed":
-            raise RuntimeError(f"Video generation failed: {data.get('error')}")
+
+        # Agnes sometimes wraps the task status under a "data" key, sometimes not.
+        status_obj = data.get("data") or data
+        status = status_obj.get("status")
+
+        if status == "completed":
+            # The finished video URL has shown up under several different field
+            # names in practice — check all of them rather than trusting one.
+            url = (
+                status_obj.get("video_url")
+                or status_obj.get("url")
+                or status_obj.get("remixed_from_video_id")
+                or (status_obj.get("metadata") or {}).get("url")
+                or data.get("result_url")
+            )
+            if not url:
+                raise RuntimeError(f"Video completed but no URL field found. Raw response: {data}")
+            return url
+
+        if status == "failed":
+            raise RuntimeError(f"Video generation failed: {status_obj.get('error')}")
+
         time.sleep(interval)
     raise TimeoutError(f"Video {video_id} timed out")
 
@@ -138,17 +175,45 @@ def download(url: str, path: Path) -> None:
     path.write_bytes(r.content)
 
 
-def generate_voiceover(sentence: str, out_path: Path) -> None:
+CAPTION_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+
+def merge_clip_with_caption(video_path: Path, audio_path: Path, caption_text: str, out_path: Path) -> None:
+    """Combine a scene's video + narration audio, and burn in the caption:
+    white bold text with a black outline, centered near the bottom."""
+    caption_file = OUTPUT_DIR / "caption.txt"
+    caption_file.write_text(caption_text, encoding="utf-8")
+
+    drawtext = (
+        f"drawtext=fontfile={CAPTION_FONT}:textfile={caption_file}:"
+        f"fontcolor=white:fontsize=56:borderw=4:bordercolor=black:"
+        f"x=(w-text_w)/2:y=h-th-100:line_spacing=10"
+    )
+
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-i", str(audio_path),
+            "-vf", drawtext,
+            "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            str(out_path),
+        ],
+        check=True,
+    )
+
+
+def generate_voiceover(text: str, out_path: Path) -> None:
     import edge_tts
 
     async def run():
-        communicate = edge_tts.Communicate(sentence, TTS_VOICE)
+        communicate = edge_tts.Communicate(text, TTS_VOICE)
         await communicate.save(str(out_path))
 
     asyncio.run(run())
 
 
-def upload_to_youtube(video_path: Path, sentences: list[str]) -> str:
+def upload_to_youtube(video_path: Path, scenes: list[dict]) -> str:
     """Upload the finished video as a public YouTube Short, with default hashtags."""
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
@@ -164,11 +229,11 @@ def upload_to_youtube(video_path: Path, sentences: list[str]) -> str:
     youtube = build("youtube", "v3", credentials=creds)
 
     # Title: first sentence, trimmed to leave room for "#Shorts" (100 char limit total).
-    title = sentences[0][:90].strip()
+    title = scenes[0]["text"][:90].strip()
     if "#shorts" not in title.lower():
         title = f"{title} #Shorts"
 
-    full_script = ". ".join(sentences) + "."
+    full_script = ". ".join(s["text"] for s in scenes) + "."
     hashtag_line = " ".join(DEFAULT_HASHTAGS)
     description = f"{full_script}\n\n{hashtag_line}"
 
@@ -196,37 +261,30 @@ def upload_to_youtube(video_path: Path, sentences: list[str]) -> str:
 
 
 def main() -> None:
-    sentences = split_script(SCRIPT_PATH)
-    print(f"Found {len(sentences)} scenes in script.txt")
+    scenes = split_script(SCRIPT_PATH)
+    print(f"Found {len(scenes)} scenes in script.txt")
 
-    reference_url = generate_character_reference(sentences)
+    reference_url = generate_character_reference(scenes)
     print(f"Character reference: {reference_url}")
 
     merged_clips = []
-    for i, sentence in enumerate(sentences):
-        print(f"\nScene {i + 1}/{len(sentences)}: {sentence}")
+    for i, scene in enumerate(scenes):
+        print(f"\nScene {i + 1}/{len(scenes)}: {scene['text']}")
+        if scene["visual"]:
+            print(f"  Visual direction: {scene['visual']}")
 
-        scene_image_url = generate_scene_image(sentence, reference_url)
-        video_id = create_video_task(scene_image_url, sentence)
+        scene_image_url = generate_scene_image(scene, reference_url)
+        video_id = create_video_task(scene_image_url, scene)
         video_url = poll_video(video_id)
 
         clip_path = OUTPUT_DIR / f"scene_{i:02d}.mp4"
         download(video_url, clip_path)
 
         audio_path = OUTPUT_DIR / f"scene_{i:02d}.mp3"
-        generate_voiceover(sentence, audio_path)
+        generate_voiceover(scene["text"], audio_path)
 
         merged_path = OUTPUT_DIR / f"merged_{i:02d}.mp4"
-        subprocess.run(
-            [
-                "ffmpeg", "-y",
-                "-i", str(clip_path),
-                "-i", str(audio_path),
-                "-c:v", "copy", "-c:a", "aac", "-shortest",
-                str(merged_path),
-            ],
-            check=True,
-        )
+        merge_clip_with_caption(clip_path, audio_path, scene["text"], merged_path)
         merged_clips.append(merged_path)
 
     concat_list = OUTPUT_DIR / "concat.txt"
@@ -246,7 +304,7 @@ def main() -> None:
     print(f"\nDone: {final_output}")
 
     if os.environ.get("YOUTUBE_REFRESH_TOKEN"):
-        upload_to_youtube(final_output, sentences)
+        upload_to_youtube(final_output, scenes)
     else:
         print("Skipping upload (no YOUTUBE_REFRESH_TOKEN set) — video saved locally only.")
 
